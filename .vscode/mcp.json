@@ -1,0 +1,12 @@
+{
+  "servers": {
+    "time_server": {
+      "type": "stdio",
+      "command": "bash",
+      "args": [
+        "-lc",
+        "cd \"${workspaceFolder}\" && npm run build >&2 && node dist/index.js"
+      ]
+    }
+  }
+}
