@@ -1,0 +1,23 @@
+{
+  "name": "reykjavik",
+  "version": "0.1.0",
+  "description": "MCP server time_server exposing get_time with MCP Apps UI",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "private": true,
+  "dependencies": {
+    "@modelcontextprotocol/ext-apps": "1.1.2",
+    "@modelcontextprotocol/sdk": "1.27.1"
+  },
+  "devDependencies": {
+    "@types/node": "25.3.1",
+    "typescript": "5.9.3"
+  }
+}
