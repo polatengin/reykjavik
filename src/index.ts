@@ -1,8 +1,13 @@
-import { registerAppTool } from "@modelcontextprotocol/ext-apps/server";
+import {
+  registerAppResource,
+  registerAppTool,
+  RESOURCE_MIME_TYPE,
+} from "@modelcontextprotocol/ext-apps/server";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import * as z from "zod/v4";
 
+const RESOURCE_URI = "ui://time_server/time-view.html";
 const TIMEZONE_OPTIONS = [
   "pst",
   "est",
@@ -168,6 +173,200 @@ async function promptForTimezoneSelection(
   };
 }
 
+const APP_HTML = `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>time_server</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family: ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      }
+      body {
+        margin: 0;
+        padding: 12px;
+      }
+      .card {
+        border: 1px solid color-mix(in oklab, currentColor 20%, transparent);
+        border-radius: 10px;
+        padding: 12px;
+      }
+      .row {
+        margin: 0 0 8px 0;
+      }
+      code {
+        word-break: break-all;
+      }
+      button {
+        margin-top: 8px;
+        padding: 6px 10px;
+        background-color: red;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <p class="row"><strong>Status:</strong> <span id="status">Connecting...</span></p>
+      <p class="row"><strong>Selected timezone:</strong> <code id="selected-timezone">-</code></p>
+      <p class="row"><strong>Local time:</strong> <code id="local-time">-</code></p>
+      <p class="row"><strong>UTC ISO:</strong> <code id="utc-iso">-</code></p>
+      <p class="row"><strong>Epoch ms:</strong> <code id="epoch-ms">-</code></p>
+      <button id="refresh" type="button">Refresh time</button>
+    </div>
+    <script>
+      (() => {
+        const statusEl = document.getElementById("status");
+        const selectedTimezoneEl = document.getElementById("selected-timezone");
+        const localTimeEl = document.getElementById("local-time");
+        const utcIsoEl = document.getElementById("utc-iso");
+        const epochMsEl = document.getElementById("epoch-ms");
+        const refreshBtn = document.getElementById("refresh");
+        const VALID_TIMEZONE_OPTIONS = new Set(["pst", "est", "utc", "european", "australian", "other"]);
+        let currentArguments = { timezone: "utc" };
+
+        const pending = new Map();
+        let nextId = 1;
+
+        const send = (message) => {
+          window.parent.postMessage({ jsonrpc: "2.0", ...message }, "*");
+        };
+
+        const sendRequest = (method, params) => {
+          const id = nextId++;
+          send({ id, method, params });
+          return new Promise((resolve, reject) => {
+            pending.set(id, { resolve, reject });
+          });
+        };
+
+        const normalizeArguments = (argumentsValue) => {
+          if (!argumentsValue || typeof argumentsValue !== "object") {
+            return null;
+          }
+
+          const timezone = argumentsValue.timezone;
+          if (!VALID_TIMEZONE_OPTIONS.has(timezone)) {
+            return null;
+          }
+
+          if (timezone !== "other") {
+            return { timezone };
+          }
+
+          const customTimezone = typeof argumentsValue.custom_timezone === "string"
+            ? argumentsValue.custom_timezone.trim()
+            : "";
+
+          if (!customTimezone) {
+            return null;
+          }
+
+          return { timezone, custom_timezone: customTimezone };
+        };
+
+        const renderResult = (result) => {
+          const structured = result && result.structuredContent ? result.structuredContent : {};
+          const textContent = Array.isArray(result && result.content)
+            ? result.content.find((item) => item && item.type === "text" && typeof item.text === "string")
+            : undefined;
+          const selectedTimezone = typeof structured.timezone === "string" ? structured.timezone : "-";
+          const localTime = typeof structured.local_time === "string" ? structured.local_time : textContent ? textContent.text : "-";
+          const utcIso = typeof structured.utc_iso === "string" ? structured.utc_iso : textContent ? textContent.text : "-";
+          const epochMs = typeof structured.epoch_ms === "number" ? structured.epoch_ms : null;
+
+          selectedTimezoneEl.textContent = selectedTimezone;
+          localTimeEl.textContent = localTime;
+          utcIsoEl.textContent = utcIso;
+          epochMsEl.textContent = epochMs === null ? "-" : String(epochMs);
+        };
+
+        window.addEventListener("message", (event) => {
+          const message = event.data;
+          if (!message || message.jsonrpc !== "2.0") {
+            return;
+          }
+
+          if (Object.prototype.hasOwnProperty.call(message, "id") && !message.method) {
+            const entry = pending.get(message.id);
+            if (!entry) {
+              return;
+            }
+            pending.delete(message.id);
+            if (message.error) {
+              entry.reject(new Error(message.error.message || "Unknown JSON-RPC error"));
+            } else {
+              entry.resolve(message.result);
+            }
+            return;
+          }
+
+          if (message.method === "ui/notifications/tool-result") {
+            renderResult(message.params);
+            statusEl.textContent = "Ready";
+            return;
+          }
+
+          if (message.method === "ui/notifications/tool-cancelled") {
+            statusEl.textContent = "Tool call cancelled";
+            return;
+          }
+
+          if (message.method === "ui/notifications/tool-input") {
+            const normalizedArguments = normalizeArguments(message.params && message.params.arguments);
+            if (normalizedArguments) {
+              currentArguments = normalizedArguments;
+            }
+            return;
+          }
+
+          if (message.method === "ping" && Object.prototype.hasOwnProperty.call(message, "id")) {
+            send({ id: message.id, result: {} });
+            return;
+          }
+
+          if (message.method === "ui/resource-teardown" && Object.prototype.hasOwnProperty.call(message, "id")) {
+            send({ id: message.id, result: {} });
+          }
+        });
+
+        refreshBtn.addEventListener("click", async () => {
+          statusEl.textContent = "Refreshing...";
+          try {
+            if (currentArguments.timezone === "other" && !currentArguments.custom_timezone) {
+              statusEl.textContent = "Ask for a custom IANA timezone first (e.g. Europe/Berlin).";
+              return;
+            }
+
+            const result = await sendRequest("tools/call", { name: "get_time", arguments: currentArguments });
+            renderResult(result);
+            statusEl.textContent = "Ready";
+          } catch (error) {
+            statusEl.textContent = error instanceof Error ? error.message : "Refresh failed";
+          }
+        });
+
+        const initialize = async () => {
+          try {
+            await sendRequest("ui/initialize", {
+              protocolVersion: "2026-01-26",
+              appInfo: { name: "time_server_view", version: "0.1.0" },
+              appCapabilities: {},
+            });
+            send({ method: "ui/notifications/initialized", params: {} });
+            statusEl.textContent = "Connected";
+          } catch (error) {
+            statusEl.textContent = error instanceof Error ? error.message : "Initialization failed";
+          }
+        };
+
+        void initialize();
+      })();
+    </script>
+  </body>
+</html>`;
+
 const server = new McpServer({
   name: "time_server",
   version: "0.1.0",
@@ -272,7 +471,11 @@ registerAppTool(
       utc_iso: z.string().describe("Current UTC time in ISO 8601 format."),
       epoch_ms: z.number().int().describe("Unix epoch time in milliseconds."),
     }),
-    _meta: {},
+    _meta: {
+      ui: {
+        resourceUri: RESOURCE_URI,
+      },
+    },
   },
   async ({ timezone, custom_timezone }) => {
     const resolvedTimezone = resolveTimezone(
@@ -300,6 +503,30 @@ registerAppTool(
       },
     };
   },
+);
+
+registerAppResource(
+  server,
+  RESOURCE_URI,
+  RESOURCE_URI,
+  {
+    description: "Interactive MCP App view for get_time results.",
+    mimeType: RESOURCE_MIME_TYPE,
+  },
+  async () => ({
+    contents: [
+      {
+        uri: RESOURCE_URI,
+        mimeType: RESOURCE_MIME_TYPE,
+        text: APP_HTML,
+        _meta: {
+          ui: {
+            prefersBorder: true,
+          },
+        },
+      },
+    ],
+  }),
 );
 
 async function main(): Promise<void> {
